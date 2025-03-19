@@ -60,7 +60,7 @@ google-cloud-secret-manager
 google-cloud-resource-manager
 protobuf
 ```
-Deploy the function with the following command. Ensure that the Cloud Function file is called main.py. (For the actual Cloud Function see Appendix 1)
+Deploy the function with the following command. Ensure that the Cloud Function file is called main.py. 
 gcloud functions deploy cyera-to-scc \
     --runtime python310 \
     --trigger-topic cyera-trigger \
