@@ -1,0 +1,10 @@
+requests
+google-cloud-securitycenter
+google-cloud-secret-manager
+google-cloud-resource-manager
+google-auth
+google-auth-oauthlib
+google-auth-httplib2
+google-api-core
+protobuf
+
