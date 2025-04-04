@@ -9,48 +9,45 @@ from google.protobuf.timestamp_pb2 import Timestamp
 import os
 from google.auth import default
 
-# ✅ Initialize Secret Manager Client
-SECRET_MANAGER_CLIENT = secretmanager.SecretManagerServiceClient()
 
-if "GOOGLE_APPLICATION_CREDENTIALS" not in os.environ:
-    print("⚠️ Warning: GOOGLE_APPLICATION_CREDENTIALS is not set. Using default credentials.")
-    credentials, project_id = default()
-else:
-    print(f"✅ Using credentials from: {os.getenv('GOOGLE_APPLICATION_CREDENTIALS')}")
-    credentials, project_id = default()
+def get_project_id():
+    try:
+        from google.auth import default
+        credentials, project_id = default()
+        if project_id:
+            print(f"✅ PROJECT_ID from default(): {project_id}")
+            return project_id
+
+        METADATA_URL = "http://metadata.google.internal/computeMetadata/v1/project/project-id"
+        headers = {"Metadata-Flavor": "Google"}
+        response = requests.get(METADATA_URL, headers=headers, timeout=3)
+        if response.status_code == 200:
+            project_id = response.text.strip()
+            print(f"✅ PROJECT_ID from metadata server: {project_id}")
+            return project_id
+
+    except Exception as e:
+        print(f"❌ Failed to retrieve PROJECT_ID: {e}")
+
+    print("❌ PROJECT_ID could not be determined.")
+    exit(1)
+
+SECRET_MANAGER_CLIENT = secretmanager.SecretManagerServiceClient()
+credentials, _ = default()
+PROJECT_ID = get_project_id()
 
 def get_secret(secret_name):
-    """
-    Retrieves a secret value from Google Secret Manager.
-    Dynamically determines the current GCP project ID to avoid hardcoding.
-    """
     try:
-        project_id = os.getenv("GOOGLE_CLOUD_PROJECT")  
-        if not project_id:
-            credentials, project_id = default()
-
-        if not project_id:  
-            print("❌ Error: PROJECT_ID is empty or not retrieved correctly from Secret Manager.")
-            exit(1)
-
-        print(f"✅ Retrieved PROJECT_ID: {project_id}")
-
-        secret_path = f"projects/{project_id}/secrets/{secret_name}/versions/latest"
-
+        secret_path = f"projects/{PROJECT_ID}/secrets/{secret_name}/versions/latest"
         response = SECRET_MANAGER_CLIENT.access_secret_version(request={"name": secret_path})
-
         return response.payload.data.decode("UTF-8").strip()
-
     except Exception as e:
         print(f"❌ Error retrieving secret `{secret_name}`: {e}")
         exit(1)
 
-# ✅ Retrieve secrets
 CLIENT_ID = get_secret("CLIENT_ID")
 CLIENT_SECRET = get_secret("CLIENT_SECRET")
-PROJECT_ID = get_secret("PROJECT_ID")
 
-# ✅ Cyera API Configuration
 BASE_URL = "https://api.cyera.io"
 AUTH_ENDPOINT = "/v1/login"
 ISSUES_ENDPOINT = "/v3/issues"
@@ -62,6 +59,7 @@ def get_jwt_token():
     payload = {"clientId": CLIENT_ID, "secret": CLIENT_SECRET}
     response = requests.post(url, json=payload)
     if response.status_code == 200:
+        print("✅ Successfully authenticated with Cyera API.")
         return response.json()["jwt"]
     else:
         print(f"❌ Authentication failed: {response.text}")
@@ -71,15 +69,16 @@ def get_all_issues(jwt_token):
     offset = 0
     all_issues = []
     headers = {"Authorization": f"Bearer {jwt_token}", "Content-Type": "application/json"}
-    
+
     while True:
         url = f"{BASE_URL}{ISSUES_ENDPOINT}"
         params = {"limit": LIMIT, "offset": offset}
         response = requests.get(url, headers=headers, params=params)
-        
+
         if response.status_code == 200:
             data = response.json()
             issues = data.get("results", [])
+            print(f"📥 Retrieved {len(issues)} issues (offset={offset})")
             if not issues:
                 break
 
@@ -89,12 +88,10 @@ def get_all_issues(jwt_token):
             print(f"❌ Failed to fetch issues: {response.text}")
             exit(1)
 
+    print(f"✅ Total issues retrieved: {len(all_issues)}")
     return all_issues
 
-##########
-
 def get_datastore(token, datastore_uid):
-    """Fetches datastore details for a given UID."""
     datastore_url = f"{BASE_URL}{DATASTORES_ENDPOINT}"
     headers = {
         "Authorization": f"Bearer {token}",
@@ -107,22 +104,46 @@ def get_datastore(token, datastore_uid):
         results = response.json().get("results", [])
         return results[0] if results else None
     else:
-        print(f"Error fetching datastore {datastore_uid}: {response.status_code}")
+        print(f"❌ Error fetching datastore {datastore_uid}: {response.status_code}")
         return None
-
-###############
-
-
 
 def authenticate_scc():
     return securitycenter_v2.SecurityCenterClient()
 
 def get_organization_id(client, project_id):
     from google.cloud import resourcemanager_v3
-    resource_client = resourcemanager_v3.ProjectsClient()
-    project_path = f"projects/{project_id}"
-    project = resource_client.get_project(name=project_path)
-    return project.parent.split("/")[-1] if project.parent.startswith("organizations/") else None
+    try:
+        resource_client = resourcemanager_v3.ProjectsClient()
+        project_path = f"projects/{project_id}"
+        print(f"🔍 Looking up project: {project_path}")
+        project = resource_client.get_project(name=project_path)
+        print(f"✅ Project retrieved: {project.name}, Parent: {project.parent}")
+
+        parent = project.parent
+        while parent and not parent.startswith("organizations/"):
+            print(f"🔄 Traversing parent: {parent}")
+            if parent.startswith("folders/"):
+                folder_client = resourcemanager_v3.FoldersClient()
+                folder = folder_client.get_folder(name=parent)
+                parent = folder.parent
+            else:
+                print("⚠️ Unsupported parent type or reached top-level without organization.")
+                return None
+
+        if parent and parent.startswith("organizations/"):
+            org_id = parent.split("/")[-1]
+            print(f"✅ Found organization ID: {org_id}")
+            return org_id
+        else:
+            print("⚠️ No organization found in parent chain.")
+            return None
+
+    except Exception as e:
+        print(f"❌ Failed to retrieve organization ID for project {project_id}: {e}")
+        return None
+    except Exception as e:
+        print(f"❌ Failed to retrieve organization ID for project {project_id}: {e}")
+        return None
 
 def get_or_create_scc_source(client, organization_id):
     parent = f"organizations/{organization_id}"
@@ -150,27 +171,18 @@ def generate_valid_finding_id(issue_uid):
     sanitized_id = re.sub(r'[^a-zA-Z0-9]', '', issue_uid)
     return sanitized_id[:32] if sanitized_id else ''.join(random.choices(string.ascii_lowercase + string.digits, k=32))
 
-
-
-
-##################################################################################################################
 def create_or_update_finding(client, organization_id, source_id, issue, datastore):
-    """Creates or updates a finding in SCC with Cyera issue and datastore properties."""
     parent = f"organizations/{organization_id}/sources/{source_id}"
     finding_id = generate_valid_finding_id(issue.get("uid", ""))
     event_time = Timestamp()
     event_time.GetCurrentTime()
     severity = map_severity(issue.get("severity", "LOW"))
-    
-    # ✅ Map Cyera Issue Datastore to SCC Resource ID
-    resource_name = f"//cloudresourcemanager.googleapis.com/projects/{project_id}/datastores/{issue.get('datastoreUid', 'unknown')}"
 
-    # ✅ Determine Finding State (Always ACTIVE unless explicitly set otherwise)
+    resource_name = f"//cloudresourcemanager.googleapis.com/projects/{PROJECT_ID}/datastores/{issue.get('datastoreUid', 'unknown')}"
     finding_state = securitycenter_v2.Finding.State.ACTIVE
 
-    # ✅ Prepare Finding Properties
     finding_properties = {
-        "state": finding_state,  # ✅ Ensure state is set to ACTIVE
+        "state": finding_state,
         "category": issue.get("name", "Uncategorized Issue"),
         "severity": severity,
         "event_time": event_time,
@@ -185,7 +197,6 @@ def create_or_update_finding(client, organization_id, source_id, issue, datastor
         }
     }
 
-    # ✅ Check if Finding Exists
     existing_finding = next(
         (f.finding for f in client.list_findings(request={"parent": parent}) if f.finding.name.endswith(finding_id)),
         None
@@ -200,39 +211,47 @@ def create_or_update_finding(client, organization_id, source_id, issue, datastor
         ))
         print(f"✅ Finding Updated: {existing_finding.name} (Severity: {severity.name})")
     else:
-        print(f"🆕 Creating new finding: {finding_id}")
+        print(f"🔎 Creating new finding: {finding_id}")
         new_finding = securitycenter_v2.Finding(**finding_properties)
         response = client.create_finding(request=securitycenter_v2.CreateFindingRequest(
             parent=parent, finding_id=finding_id, finding=new_finding
         ))
         print(f"✅ New Finding Created: {response.name}")
 
-
 def cloud_function_entry(data, context):
-    """
-    Event-Triggered Google Cloud Function entry point.
-    `data` contains event payload, `context` contains metadata.
-    """
     try:
         print(f"✅ Received Event ID: {context.event_id}")
         print(f"✅ Event Type: {context.event_type}")
 
         jwt_token = get_jwt_token()
+        if not jwt_token:
+            print("❌ No JWT token retrieved.")
+            return "Authentication failed.", 401
+
         issues = get_all_issues(jwt_token)
+        if not issues:
+            print("⚠️ No issues retrieved from Cyera.")
+            return "No issues to process.", 200
+
         scc_client = authenticate_scc()
         organization_id = get_organization_id(scc_client, PROJECT_ID)
 
         if not organization_id:
-            return "❌ Could not retrieve organization ID.", 500
+            print("❌ Could not retrieve organization ID.")
+            return "Could not retrieve organization ID.", 500
 
         source_id = get_or_create_scc_source(scc_client, organization_id)
+        print(f"🔗 Using SCC source ID: {source_id}")
 
-        for issue in issues:
+        for i, issue in enumerate(issues, start=1):
+            print(f"🔍 Processing issue {i}/{len(issues)}: UID={issue.get('uid')}")
             datastore_uid = issue.get("datastoreUid")
             datastore = get_datastore(jwt_token, datastore_uid) if datastore_uid else None
             create_or_update_finding(scc_client, organization_id, source_id, issue, datastore)
-            
+
         print(f"✅ Successfully processed {len(issues)} findings in SCC.")
+        return "Processing complete.", 200
+
     except Exception as e:
         print(f"❌ Error processing event: {str(e)}")
-
+        return "Internal Server Error", 500
