@@ -9,7 +9,6 @@ from google.protobuf.timestamp_pb2 import Timestamp
 import os
 from google.auth import default
 
-
 def get_project_id():
     try:
         from google.auth import default
@@ -141,9 +140,6 @@ def get_organization_id(client, project_id):
     except Exception as e:
         print(f"❌ Failed to retrieve organization ID for project {project_id}: {e}")
         return None
-    except Exception as e:
-        print(f"❌ Failed to retrieve organization ID for project {project_id}: {e}")
-        return None
 
 def get_or_create_scc_source(client, organization_id):
     parent = f"organizations/{organization_id}"
@@ -194,6 +190,7 @@ def create_or_update_finding(client, organization_id, source_id, issue, datastor
             "cyera_datastore_provider": datastore.get("provider", "Unknown") if datastore else "Unknown",
             "cyera_datastore_type": datastore.get("type", "Unknown") if datastore else "Unknown",
             "cyera_datastore_sensitivity": datastore.get("sensitivity", "Unknown") if datastore else "Unknown",
+            "cyera_cloud_provider_url": datastore.get("cloudProviderUrl", "Unknown") if datastore else "Unknown",
         }
     }
 
